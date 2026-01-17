@@ -790,6 +790,139 @@ export const useCalcdexPresets = (
     ...AllPlayerKeys.map((key) => state?.[key]?.pokemon?.length),
   ]);
 
+  // auto-update moveset when opponent reveals a move not in current moveset
+  React.useEffect(() => {
+    const scope = s('(AutoUpdateMoveset)');
+    const endTimer = runtimer(scope, l);
+
+    const shouldCheck = !!state?.battleId
+      && !!state.format
+      && presets.ready
+      && AllPlayerKeys.some((key) => !!state?.[key]?.pokemon?.length);
+
+    if (!shouldCheck) {
+      return void endTimer('(not ready)');
+    }
+
+    const playersPayload: Partial<Record<CalcdexPlayerKey, Partial<CalcdexPlayer>>> = {};
+
+    AllPlayerKeys.forEach((playerKey) => {
+      const player = state[playerKey];
+
+      if (!player?.pokemon?.length) {
+        return;
+      }
+
+      const party = cloneAllPokemon(player.pokemon);
+      let didUpdate = false;
+
+      party.forEach((pokemon, pokemonIndex) => {
+        // Skip if no revealed moves or if all revealed moves are already in the moveset
+        if (!pokemon.revealedMoves?.length || !pokemon.moves?.length) {
+          return;
+        }
+
+        // Check if any revealed move is not in the current moveset
+        const newRevealedMoves = pokemon.revealedMoves.filter(
+          (revealedMove) => !pokemon.moves.includes(revealedMove),
+        );
+
+        if (!newRevealedMoves.length) {
+          return;
+        }
+
+        // Find matching presets that include all revealed moves
+        const pokemonPresets = selectPokemonPresets(
+          presets.presets,
+          pokemon,
+          {
+            format: state.format,
+            select: 'any',
+            filter: (p) => p.source !== 'usage',
+          },
+        ).sort(presetSorter);
+
+        const pokemonUsages = selectPokemonPresets(
+          presets.usages,
+          pokemon,
+          {
+            format: state.format,
+            formatOnly: true,
+            source: 'usage',
+            select: 'any',
+          },
+        );
+
+        // Find presets that match the revealed moves
+        const matchedPresets = guessMatchingPresets(pokemonPresets, pokemon, {
+          format: state.format,
+          formatOnly: true,
+          usages: pokemonUsages,
+        });
+
+        if (!matchedPresets.length) {
+          return;
+        }
+
+        // Apply the first matching preset
+        const [preset] = matchedPresets;
+        const [usage] = pokemonUsages;
+
+        if (preset?.calcdexId) {
+          const presetPayload = applyPreset(pokemon, preset, {
+            format: state.format,
+            usage,
+          });
+
+          if (presetPayload && Object.keys(presetPayload).length > 0) {
+            party[pokemonIndex] = { ...pokemon, ...presetPayload };
+            didUpdate = true;
+
+            l.debug(
+              '(Auto-Update Moveset)', 'player', playerKey, 'pokemon', pokemon.ident || pokemon.speciesForme,
+              '\n', 'newRevealedMoves[]', newRevealedMoves,
+              '\n', 'matchedPresets[]', matchedPresets,
+              '\n', 'applied preset', preset,
+            );
+          }
+        }
+      });
+
+      if (didUpdate) {
+        playersPayload[playerKey] = { pokemon: party };
+      }
+    });
+
+    if (!nonEmptyObject(playersPayload)) {
+      return void endTimer('(no change)');
+    }
+
+    dispatch(calcdexSlice.actions.update({
+      scope: l.scope,
+      battleId: state.battleId,
+      ...playersPayload,
+    }));
+
+    endTimer('(dispatched)');
+  }, [
+    presetSorter,
+    presets.presets,
+    presets.usages,
+    presets.ready,
+    state?.battleId,
+    state?.format,
+    ...AllPlayerKeys.map((key) => {
+      const pokemon = state?.[key]?.pokemon || [];
+      return pokemon.map((p) => [
+        p.calcdexId,
+        p.revealedMoves?.length,
+        p.revealedMoves?.join(','),
+        p.moves?.length,
+        p.moves?.join(','),
+      ].filter(Boolean).join('~')).join(':');
+    }),
+  ]);
+
   /* eslint-enable react-hooks/exhaustive-deps */
 
   return presets;
